@@ -8,12 +8,6 @@ A fast, polished, single-file Pong game built with vanilla HTML5 Canvas and Java
 ![Offline](https://img.shields.io/badge/works-offline-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-## ▶️ Play
-
-**Live demo:** https://andhony07.github.io/pong-game/
-
-Or play locally: download `index.html` and double-click it. That's it.
-
 ## ✨ Features
 
 - **Smooth gameplay at any refresh rate**: delta-time physics keep the speed identical on 60, 120 and 144 Hz displays.
