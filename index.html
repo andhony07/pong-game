@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pong</title>
+<style>
+  :root {
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    --page: #eef2fb; --card: #ffffff; --text: #14203a; --muted: #5b6b8c; --edge: rgba(20,32,58,.12);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #080d1a; --card: #0f1730; --text: #edf6ff; --muted: #8fa3c8; --edge: rgba(255,255,255,.1);
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #080d1a; --card: #0f1730; --text: #edf6ff; --muted: #8fa3c8; --edge: rgba(255,255,255,.1);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    display: grid; place-items: center; padding: 12px;
+  }
+  .wrap {
+    width: min(100%, 820px);
+    background: var(--card);
+    border: 1px solid var(--edge);
+    border-radius: 16px;
+    padding: 14px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.25);
+  }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin: 2px 4px 10px; }
+  h1 { font-size: 1rem; letter-spacing: .25em; text-transform: uppercase; margin: 0; }
+  .hint { font-size: .75rem; color: var(--muted); }
+  canvas {
+    display: block; width: 100%; aspect-ratio: 8 / 5;
+    border-radius: 10px; background: #0a1226;
+    touch-action: none; cursor: none;
+  }
+  footer { margin: 10px 4px 2px; font-size: .75rem; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Pong</h1>
+    <span class="hint" id="muteHint">First to 7 · M = mute</span>
+  </header>
+  <canvas id="c" width="800" height="500" aria-label="Pong game"></canvas>
+  <footer>Mouse / touch drag, or ↑ ↓ / W S to move · Space to start or pause</footer>
+</div>
+
+<script>
+(() => {
+  const W = 800, H = 500, WIN = 7, MAX_SPEED = 14;
+  const cv = document.getElementById("c");
+  const ctx = cv.getContext("2d");
+  const COL = { paddle: "#8ec5ff", cpu: "#ff8fb1", ball: "#ffd166", line: "rgba(215,227,255,.25)", text: "#edf6ff" };
+
+  // Crisp rendering on high-DPI screens, game logic stays in 800x500 units
+  function fit() {
+    const d = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = W * d; cv.height = H * d;
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+  }
+  fit();
+  addEventListener("resize", fit);
+
+  const player = { x: 24, y: H / 2 - 45, w: 12, h: 90 };
+  const cpu    = { x: W - 36, y: H / 2 - 45, w: 12, h: 90, err: 0 };
+  const ball   = { x: W / 2, y: H / 2, r: 8, vx: 0, vy: 0, speed: 6 };
+
+  let state = "ready";            // ready | playing | paused | over
+  let score = [0, 0], serveT = 0, shake = 0, msg = "";
+  let trail = [], parts = [];
+  let keyDir = 0, pointerY = null, muted = false, actx = null;
+  const keys = new Set();
+
+  // ---- Audio (tiny synth beeps, created lazily on first input) ----
+  function beep(freq, dur = 0.07, type = "square", vol = 0.05) {
+    if (muted) return;
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+      o.connect(g); g.connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + dur);
+    } catch (e) {}
+  }
+
+  // ---- Game flow ----
+  function serve(dir) {
+    ball.x = W / 2; ball.y = H / 2; ball.speed = 6;
+    const a = (Math.random() - 0.5) * 0.9;
+    ball.vx = Math.cos(a) * ball.speed * dir;
+    ball.vy = Math.sin(a) * ball.speed;
+    trail.length = 0; serveT = 45; cpu.err = 0;
+  }
+  function newMatch() {
+    score = [0, 0];
+    player.y = cpu.y = H / 2 - 45;
+    serve(Math.random() < 0.5 ? 1 : -1);
+  }
+  function startOrToggle() {
+    if (state === "ready" || state === "over") { newMatch(); state = "playing"; }
+    else if (state === "playing") state = "paused";
+    else if (state === "paused") state = "playing";
+  }
+
+  function burst(x, y, color, n = 12) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 3.5;
+      parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color });
+    }
+  }
+
+  function paddleHit(p, dir) {
+    const hit = ball.x + ball.r > p.x && ball.x - ball.r < p.x + p.w &&
+                ball.y + ball.r > p.y && ball.y - ball.r < p.y + p.h &&
+                ball.vx * dir < 0;
+    if (!hit) return;
+    const rel = Math.max(-1, Math.min(1, (ball.y - (p.y + p.h / 2)) / (p.h / 2)));
+    ball.speed = Math.min(ball.speed * 1.05, MAX_SPEED);
+    const ang = rel * 0.95;
+    ball.vx = Math.cos(ang) * ball.speed * dir;
+    ball.vy = Math.sin(ang) * ball.speed;
+    ball.x = dir > 0 ? p.x + p.w + ball.r : p.x - ball.r;
+    if (dir > 0) cpu.err = (Math.random() - 0.5) * 70;   // CPU re-aims imperfectly
+    burst(ball.x, ball.y, dir > 0 ? COL.paddle : COL.cpu);
+    shake = 4; beep(dir > 0 ? 440 : 330);
+  }
+
+  function point(who) {
+    score[who]++;
+    burst(ball.x < W / 2 ? 0 : W, ball.y, COL.ball, 24);
+    shake = 9; beep(who === 0 ? 660 : 180, 0.2, "triangle", 0.07);
+    if (score[who] >= WIN) { state = "over"; msg = who === 0 ? "You win!" : "CPU wins"; }
+    else serve(who === 0 ? -1 : 1);
+  }
+
+  // ---- Update (delta-time based, so speed is the same on 60/120/144 Hz) ----
+  function update(dt) {
+    if (state !== "playing") return;
+
+    // Player: keyboard wins over pointer while a key is held
+    if (keyDir) { player.y += keyDir * 9 * dt; pointerY = null; }
+    else if (pointerY !== null) player.y += (pointerY - player.h / 2 - player.y) * Math.min(1, 0.45 * dt);
+    player.y = Math.max(0, Math.min(H - player.h, player.y));
+
+    // CPU: limited speed, tracks the ball only when it's incoming
+    const target = ball.vx > 0 ? ball.y + cpu.err : H / 2;
+    const diff = target - (cpu.y + cpu.h / 2), max = 4.8 * dt;
+    cpu.y += Math.max(-max, Math.min(max, diff));
+    cpu.y = Math.max(0, Math.min(H - cpu.h, cpu.y));
+
+    if (serveT > 0) { serveT -= dt; return; }
+
+    ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+    trail.push({ x: ball.x, y: ball.y }); if (trail.length > 14) trail.shift();
+
+    if (ball.y < ball.r)     { ball.y = ball.r;     ball.vy =  Math.abs(ball.vy); beep(250, 0.04); }
+    if (ball.y > H - ball.r) { ball.y = H - ball.r; ball.vy = -Math.abs(ball.vy); beep(250, 0.04); }
+
+    paddleHit(player, 1);
+    paddleHit(cpu, -1);
+
+    if (ball.x < -ball.r) point(1);
+    else if (ball.x > W + ball.r) point(0);
+  }
+
+  // ---- Drawing ----
+  function glowRect(p, color) {
+    ctx.shadowColor = color; ctx.shadowBlur = 16; ctx.fillStyle = color;
+    ctx.beginPath(); ctx.roundRect(p.x, p.y, p.w, p.h, 6); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function draw(dt) {
+    ctx.save();
+    ctx.clearRect(0, 0, W, H);
+    if (shake > 0.2) { ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake); shake *= Math.pow(0.85, dt); }
+
+    // Background
+    const g = ctx.createRadialGradient(W / 2, H / 2, 40, W / 2, H / 2, W * 0.7);
+    g.addColorStop(0, "#14204a"); g.addColorStop(1, "#070b18");
+    ctx.fillStyle = g; ctx.fillRect(-20, -20, W + 40, H + 40);
+
+    // Center line
+    ctx.setLineDash([10, 14]); ctx.strokeStyle = COL.line; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke(); ctx.setLineDash([]);
+
+    // Scores
+    ctx.font = "700 72px system-ui, Arial, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillStyle = "rgba(142,197,255,.22)"; ctx.fillText(score[0], W / 2 - 90, 24);
+    ctx.fillStyle = "rgba(255,143,177,.22)"; ctx.fillText(score[1], W / 2 + 90, 24);
+
+    // Ball trail
+    trail.forEach((t, i) => {
+      ctx.globalAlpha = (i / trail.length) * 0.35;
+      ctx.fillStyle = COL.ball;
+      ctx.beginPath(); ctx.arc(t.x, t.y, ball.r * (i / trail.length), 0, 6.283); ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+
+    glowRect(player, COL.paddle);
+    glowRect(cpu, COL.cpu);
+
+    // Ball (blinks during serve delay)
+    if (serveT <= 0 || Math.floor(serveT / 6) % 2) {
+      ctx.shadowColor = COL.ball; ctx.shadowBlur = 20; ctx.fillStyle = COL.ball;
+      ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, 6.283); ctx.fill(); ctx.shadowBlur = 0;
+    }
+
+    // Particles
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.life -= 0.03 * dt;
+      if (p.life <= 0) { parts.splice(i, 1); continue; }
+      ctx.globalAlpha = p.life; ctx.fillStyle = p.color; ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Overlays
+    if (state !== "playing") {
+      ctx.fillStyle = "rgba(7,11,24,.72)"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = COL.text; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const title = state === "ready" ? "PONG" : state === "paused" ? "PAUSED" : msg;
+      ctx.font = "800 48px system-ui, Arial, sans-serif"; ctx.fillText(title, W / 2, H / 2 - 24);
+      ctx.font = "500 18px system-ui, Arial, sans-serif"; ctx.fillStyle = "#a9bbdd";
+      const sub = state === "over" ? `${score[0]} : ${score[1]} — click or press Space to play again`
+                : state === "paused" ? "Click or press Space to resume"
+                : "Click or press Space to start";
+      ctx.fillText(sub, W / 2, H / 2 + 24);
+    }
+  }
+
+  // ---- Loop ----
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min((now - last) / 16.667, 1.5);   // clamp to avoid tunnelling after tab switches
+    last = now;
+    update(dt); draw(dt);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- Input ----
+  function setKeyDir() { keyDir = (keys.has("down") ? 1 : 0) - (keys.has("up") ? 1 : 0); }
+  const map = { ArrowUp: "up", w: "up", W: "up", ArrowDown: "down", s: "down", S: "down" };
+
+  addEventListener("keydown", e => {
+    if (map[e.key]) { keys.add(map[e.key]); setKeyDir(); e.preventDefault(); }
+    else if (e.key === " " || e.key === "Enter" || e.key === "p" || e.key === "P") {
+      if (!e.repeat) startOrToggle(); e.preventDefault();
+    } else if (e.key === "m" || e.key === "M") {
+      muted = !muted;
+      document.getElementById("muteHint").textContent = muted ? "Sound off · M = unmute" : "First to 7 · M = mute";
+    }
+  });
+  addEventListener("keyup", e => { if (map[e.key]) { keys.delete(map[e.key]); setKeyDir(); } });
+
+  // Pointer position is converted from CSS pixels into game units (fixes the scaled-canvas bug)
+  function setPointer(e) {
+    const r = cv.getBoundingClientRect();
+    pointerY = (e.clientY - r.top) * (H / r.height);
+  }
+  cv.addEventListener("pointermove", setPointer);
+  cv.addEventListener("pointerdown", e => { setPointer(e); if (state !== "playing") startOrToggle(); });
+
+  document.addEventListener("visibilitychange", () => { if (document.hidden && state === "playing") state = "paused"; });
+})();
+</script>
+</body>
+</html>
